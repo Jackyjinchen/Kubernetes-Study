@@ -1,3 +1,5 @@
+
+
 ## Kubernetes
 
 <img src="README.assets/flower.svg" alt="images/flower.svg" style="zoom: 25%;" />
@@ -64,7 +66,47 @@ Controller：确保Pod副本数量，确保所有Node运行同一个Pod，一次
 
 Service：定义一组Pod的访问规则
 
-## 集群配置实例
+## 通过Kubeadm集群配置实例
+
+### Kubeadm核心指令
+
+```shell
+# 创建一个 Master 节点
+$ kubeadm init
+# 将一个 Node 节点加入到当前集群中
+$ kubeadm join <Master节点的IP和端口 >
+```
+
+### 虚拟机配置
+
+采用Paralles Desktop安装CentOS Minimal系统
+
+<img src="README.assets/image-20200918104047450.png" alt="image-20200918104047450" style="zoom:33%;" />
+
+安装wget指令：
+
+```shell
+yum install wget
+```
+
+默认的网络设置是没有enable的，因此，在安装完之后需要开启的话，需要保证开启”Shared Network”, 同时再运行命令”/sbin/dhclient eth0”, 这样虚拟机就可以通过宿主网络来进行访问了。
+
+为了长久性，修改配置
+
+```shell
+sudo vi /etc/sysconfig/network-scripts/ifcfg-eth0
+
+# 将其中的ONBOOT改为yes
+ONBOOT=yes
+```
+
+采用FinalShell进行SSH连接，配置三台服务器(一个Master，两个Node)
+
+<img src="README.assets/image-20200918104400316.png" alt="image-20200918104400316" style="zoom:33%;" />
+
+FinalShell可以实时查看CPU、网络等运行状态
+
+<img src="README.assets/image-20200918104626178.png" alt="image-20200918104626178" style="zoom:33%;" />
 
 ### 环境配置
 
@@ -177,6 +219,10 @@ kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documen
 
 <img src="README.assets/image-20200918100302952.png" alt="image-20200918100302952" style="zoom:33%;" />
 
+Master组件：coredns、etcd、flannel-ds、apiserver、controller-manager、proxy、scheduler
+
+Node组件：flannel-ds、proxy
+
 ### 测试kubernetes集群pod
 
 ```shell
@@ -191,6 +237,14 @@ $ kubectl get pod,sv
 可以看到pod已经在运行。根据ip地址加端口号访问，例：192.168.1.11:31557可看到访问结果：
 
 <img src="README.assets/image-20200918102405643.png" alt="image-20200918102405643" style="zoom:33%;" />
+
+
+
+## 通过二进制方式集群配置实例
+
+
+
+
 
 ## 参考
 
