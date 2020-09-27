@@ -426,9 +426,9 @@ systemctl enable etcd
 ```shell
 #将生成文件拷贝到其他节点
 scp -r /opt/etcd/ root@192.168.1.15:/opt/
-scp /usr/lib/systemd/system/etcd.service root@192.168.31.72:/usr/lib/systemd/system/
+scp /usr/lib/systemd/system/etcd.service root@192.168.1.15:/usr/lib/systemd/system/
 scp -r /opt/etcd/ root@192.168.1.16:/opt/
-scp /usr/lib/systemd/system/etcd.service root@192.168.31.73:/usr/lib/systemd/system/
+scp /usr/lib/systemd/system/etcd.service root@192.168.1.16:/usr/lib/systemd/system/
 
 #分别修改其中的ETCD_NAME和地址为当前ip
 vi /usr/lib/systemd/system/etcd.service
@@ -608,9 +608,7 @@ cp kubectl /usr/bin/
 ```shell
 #apiserver配置文件
 cat > /opt/kubernetes/cfg/kube-apiserver.conf << EOF
-KUBE_APISERVER_OPTS="
-#启用日志
---logtostderr=false \\
+KUBE_APISERVER_OPTS="--logtostderr=false \\
 #日志等级
 --v=2 \\
 #日志目录
@@ -622,13 +620,13 @@ KUBE_APISERVER_OPTS="
 #https安全端口
 --secure-port=6443 \\
 #集群通告地址
---advertise-address=192.168.31.71 \\
+--advertise-address=192.168.1.14 \\
 #启用授权
 --allow-privileged=true \\
 #Service虚拟IP地址段
 --service-cluster-ip-range=10.0.0.0/24 \\
 #准入控制模块
---enable-admission-plugins=NamespaceLifecycle,LimitRanger,ServiceAccount,ResourceQuota,NodeRestric tion \\
+--enable-admission-plugins=NamespaceLifecycle,LimitRanger,ServiceAccount,ResourceQuota,NodeRestriction \\
 #认证授权，启用RBAC授权和节点自管理
 --authorization-mode=RBAC,Node \\
 #启用TLS bootstrap机制
@@ -660,6 +658,132 @@ EOF
 ```shell
 #将证书拷贝到配置路径
 cp ~/TLS/k8s/ca*pem ~/TLS/k8s/server*pem /opt/kubernetes/ssl/
+```
+
+### TLS Bootstraping
+
+Master apiserver 启用 TLS 认证后，Node 节点 kubelet 和 kube-proxy 要与 kube-apiserver 进行通信，必须使用 CA 签发的有效证书才可以，当 Node 节点很多时，这种客户端证书颁发需要大量工作，同样也会增加集群扩展复杂度。为了简化流程，Kubernetes 引入了 TLS bootstraping 机制来自动颁发客户端证书，kubelet 会以一个低权限用户自动向 apiserver 申请证书，kubelet 的证书由 apiserver 动态签署。
+
+```shell
+#生成tocken
+head -c 16 /dev/urandom | od -An -t x | tr -d ' '
+
+#配置
+cat > /opt/kubernetes/cfg/token.csv << EOF
+38c9abdf7eea167c6526158f19475b2d,kubelet-bootstrap,10001,"system:node-bootstrapper"
+EOF
+```
+
+```shell
+#systemd管理apiserver
+cat > /usr/lib/systemd/system/kube-apiserver.service << EOF
+[Unit]
+Description=Kubernetes API Server
+Documentation=https://github.com/kubernetes/kubernetes
+[Service]
+EnvironmentFile=/opt/kubernetes/cfg/kube-apiserver.conf
+ExecStart=/opt/kubernetes/bin/kube-apiserver \$KUBE_APISERVER_OPTS
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+```shell
+#启动kube-apiserver
+systemctl daemon-reload
+systemctl start kube-apiserver
+systemctl enable kube-apiserver
+```
+
+```shell
+#！！！！！！！！！！！！！！！！！！！！！！！！！
+#这里出现问题
+
+
+#授权kubelet-bootstrap用户允许请求证书
+kubectl create clusterrolebinding kubelet-bootstrap \
+--clusterrole=system:node-bootstrapper \
+--user=kubelet-bootstrap
+```
+
+<img src="README.assets/image-20200927180549233.png" alt="image-20200927180549233" style="zoom:50%;" />
+
+这里出现问题！---------------------------------
+
+部署kube-controller-manager
+
+```shell
+cat > /opt/kubernetes/cfg/kube-controller-manager.conf << EOF
+KUBE_CONTROLLER_MANAGER_OPTS="--logtostderr=false \\
+--v=2 \\
+--log-dir=/opt/kubernetes/logs \\
+--leader-elect=true \\
+--master=127.0.0.1:8080 \\
+--bind-address=127.0.0.1 \\
+--allocate-node-cidrs=true \\
+--cluster-cidr=10.244.0.0/16 \\
+--service-cluster-ip-range=10.0.0.0/24 \\
+--cluster-signing-cert-file=/opt/kubernetes/ssl/ca.pem \\
+--cluster-signing-key-file=/opt/kubernetes/ssl/ca-key.pem \\
+--root-ca-file=/opt/kubernetes/ssl/ca.pem \\
+--service-account-private-key-file=/opt/kubernetes/ssl/ca-key.pem \\
+--experimental-cluster-signing-duration=87600h0m0s"
+EOF
+```
+
+```shell
+#systemd管理controller-manager
+cat > /usr/lib/systemd/system/kube-controller-manager.service << EOF
+[Unit]
+Description=Kubernetes Controller Manager
+Documentation=https://github.com/kubernetes/kubernetes
+[Service]
+EnvironmentFile=/opt/kubernetes/cfg/kube-controller-manager.conf
+ExecStart=/opt/kubernetes/bin/kube-controller-manager \$KUBE_CONTROLLER_MANAGER_OPTS
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+```shell
+systemctl daemon-reload
+systemctl start kube-controller-manager
+systemctl enable kube-controller-manager
+```
+
+scheduler
+
+```shell
+cat > /opt/kubernetes/cfg/kube-scheduler.conf << EOF
+KUBE_SCHEDULER_OPTS="--logtostderr=false \
+--v=2 \
+--log-dir=/opt/kubernetes/logs \
+--leader-elect \
+--master=127.0.0.1:8080 \
+--bind-address=127.0.0.1"
+EOF
+```
+
+```shell
+cat > /usr/lib/systemd/system/kube-scheduler.service << EOF
+[Unit]
+Description=Kubernetes Scheduler
+Documentation=https://github.com/kubernetes/kubernetes
+[Service]
+EnvironmentFile=/opt/kubernetes/cfg/kube-scheduler.conf
+ExecStart=/opt/kubernetes/bin/kube-scheduler \$KUBE_SCHEDULER_OPTS
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+```shell
+systemctl daemon-reload
+systemctl start kube-scheduler
+systemctl enable kube-scheduler
 ```
 
 
