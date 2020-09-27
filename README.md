@@ -1,5 +1,3 @@
-
-
 ## Kubernetes
 
 <img src="README.assets/flower.svg" alt="images/flower.svg" style="zoom: 25%;" />
@@ -36,7 +34,7 @@
 
 #### Control Plane
 
- apiserver：restful统一集群入口，交给etcd存储
+apiserver：restful统一集群入口，交给etcd存储
 
 etcd：键值数据库
 
@@ -50,7 +48,7 @@ controller-manager：
 
 ​	端点控制器：填充端点对象(加入Service和Pod)
 
-​	服务账户和令牌控制：新命名空间床架账户和API访问令牌
+​	服务账户和令牌控制：新命名空间创建账户和API访问令牌
 
 #### Node
 
@@ -128,9 +126,9 @@ hostnamectl set-hostname <hostname>
 
 # 在master添加hosts 这里的名字和主机名对应
 cat >> /etc/hosts << EOF
-192.168.1.11 k8smaster
-192.168.1.12 k8snode1
-192.168.1.13 k8snode2
+192.168.1.14 k8smaster
+192.168.1.15 k8snode1
+192.168.1.16 k8snode2
 EOF
 
 # 将桥接的IPv4流量传递到iptables的链
@@ -242,7 +240,435 @@ $ kubectl get pod,sv
 
 ## 通过二进制方式集群配置实例
 
+### 配置三台虚拟机环境
 
+<img src="README.assets/image-20200925100127003.png" alt="image-20200925100127003" style="zoom:50%;" />
+
+初始化环境配置和adm方式相同。需要配置的环境如下：
+
+| 角色       | IP           | 组件                                                         |
+| ---------- | :----------- | ------------------------------------------------------------ |
+| k8s-master | 192.168.1.14 | kube-apiserver，kube-controller-manager，kube-scheduler，etcd |
+| k8s-node1  | 192.168.1.15 | kubelet，kube-proxy，docker，etcd                            |
+| k8s-node2  | 192.168.1.16 | kubelet，kube-proxy，docker，etcd                            |
+
+### 自签证书
+
+为etcd和apiserver自签证书。CFSSL是开源证书管理工具，使用json文件生成证书。
+
+#### 下载配置cfssl
+
+ ```shell
+wget https://pkg.cfssl.org/R1.2/cfssl_linux-amd64
+wget https://pkg.cfssl.org/R1.2/cfssljson_linux-amd64
+wget https://pkg.cfssl.org/R1.2/cfssl-certinfo_linux-amd64
+chmod +x cfssl_linux-amd64 cfssljson_linux-amd64 cfssl-certinfo_linux-amd64
+mv cfssl_linux-amd64 /usr/local/bin/cfssl
+mv cfssljson_linux-amd64 /usr/local/bin/cfssljson
+mv cfssl-certinfo_linux-amd64 /usr/local/bin/cfssl-certinfo
+ ```
+
+#### 自签证书颁发机构
+
+```shell
+#工作目录
+mkdir -p ~/TLS/{etcd,k8s}
+cd TLS/etcd
+```
+
+```shell
+#自签CA
+cat > ca-config.json<< EOF 
+{ 
+  "signing": { 
+    "default": { 
+    	"expiry": "87600h" 
+     },
+  "profiles": { 
+    "www": { 
+      "expiry": "87600h", 
+      "usages": [ 
+        "signing",
+        "key encipherment", 
+        "server auth", 
+        "client auth" 
+        ] 
+      } 
+    } 
+  } 
+}
+EOF
+
+cat > ca-csr.json<< EOF 
+{ 
+  "CN": "etcd CA", 
+  "key": { 
+    "algo": "rsa", 
+    "size": 2048 
+  },
+  "names": [ 
+    { 
+    "C": "CN", 
+    "L": "Beijing", 
+    "ST": "Beijing" 
+    } 
+  ] 
+}
+EOF
+```
+
+```shell
+#证书生成
+cfssl gencert -initca ca-csr.json | cfssljson -bare ca
+```
+
+```shell
+#使用自签CA签发Etcd HTTPS证书
+#证书申请文件：
+cat > server-csr.json<< EOF
+{
+  "CN": "etcd",
+  "hosts": ["192.168.1.14", "192.168.1.15", "192.168.1.16"],
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [{
+    "C": "CN",
+    "L": "BeiJing",
+    "ST": "BeiJing"
+  }]
+}
+EOF
+```
+
+```shell
+#生成证书
+cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -profile=www server-csr.json | cfssljson -bare server
+```
+
+生成证书：
+
+<img src="README.assets/image-20200925154047083.png" alt="image-20200925154047083" style="zoom:50%;" />
+
+### 部署etcd集群
+
+下载etcd：https://github.com/etcd-io/etcd/releases/tag/v3.4.13
+
+```shell
+#创建工作目录并解压二进制包
+mkdir /opt/etcd/{bin,cfg,ssl} –p
+tar zxvf etcd-v3.4.13-linux-amd64.tar.gz
+mv etcd-v3.4.13-linux-amd64/{etcd,etcdctl} /opt/etcd/bin/
+```
+
+```shell
+#etcd配置文件
+cat > /opt/etcd/cfg/etcd.conf << EOF
+#[Member]
+#节点名称
+ETCD_NAME="etcd-1"
+#数据目录
+ETCD_DATA_DIR="/var/lib/etcd/default.etcd"
+#集群通信监听地址
+ETCD_LISTEN_PEER_URLS="https://192.168.1.14:2380"
+#客户端访问监听地址
+ETCD_LISTEN_CLIENT_URLS="https://192.168.1.14:2379"
+#[Clustering]
+#集群通告地址
+ETCD_INITIAL_ADVERTISE_PEER_URLS="https://192.168.1.14:2380"
+#客户端通告地址
+ETCD_ADVERTISE_CLIENT_URLS="https://192.168.1.14:2379" 
+#集群节点地址
+ETCD_INITIAL_CLUSTER="etcd-1=https://192.168.1.14:2380,etcd-2=https://192.168.1.15:2380,etcd-3=https://192.168.1.16:2380" 
+#集群token
+ETCD_INITIAL_CLUSTER_TOKEN="etcd-cluster"
+#加入集群的当前状态，new新集群，existing已有集群
+ETCD_INITIAL_CLUSTER_STATE="new"
+EOF
+```
+
+```shell
+#systemd管理etcd
+cat > /usr/lib/systemd/system/etcd.service << EOF
+[Unit]
+Description=Etcd Server
+After=network.target
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=notify
+EnvironmentFile=/opt/etcd/cfg/etcd.conf
+ExecStart=/opt/etcd/bin/etcd \
+--cert-file=/opt/etcd/ssl/server.pem \
+--key-file=/opt/etcd/ssl/server-key.pem \
+--peer-cert-file=/opt/etcd/ssl/server.pem \
+--peer-key-file=/opt/etcd/ssl/server-key.pem \
+--trusted-ca-file=/opt/etcd/ssl/ca.pem \
+--peer-trusted-ca-file=/opt/etcd/ssl/ca.pem \
+--logger=zap
+Restart=on-failure
+LimitNOFILE=65536
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+```shell
+#拷贝证书
+cp ~/TLS/etcd/ca*pem ~/TLS/etcd/server*pem /opt/etcd/ssl/
+#设置开机启动
+systemctl daemon-reload
+systemctl start etcd
+systemctl enable etcd
+```
+
+```shell
+#将生成文件拷贝到其他节点
+scp -r /opt/etcd/ root@192.168.1.15:/opt/
+scp /usr/lib/systemd/system/etcd.service root@192.168.31.72:/usr/lib/systemd/system/
+scp -r /opt/etcd/ root@192.168.1.16:/opt/
+scp /usr/lib/systemd/system/etcd.service root@192.168.31.73:/usr/lib/systemd/system/
+
+#分别修改其中的ETCD_NAME和地址为当前ip
+vi /usr/lib/systemd/system/etcd.service
+```
+
+```shell
+#查看集群部署状态
+ETCDCTL_API=3 /opt/etcd/bin/etcdctl --cacert=/opt/etcd/ssl/ca.pem --cert=/opt/etcd/ssl/server.pem --key=/opt/etcd/ssl/server-key.pem --endpoints="https://192.168.1.14:2379,https://192.168.1.15:2379,https://192.168.1.16:2379" endpoint health
+```
+
+etcd集群已经部署成功
+
+<img src="README.assets/image-20200925164342607.png" alt="image-20200925164342607" style="zoom:50%;" />
+
+### 安装docker
+
+```shell
+#下载docker并配置
+wget https://download.docker.com/linux/static/stable/x86_64/docker-19.03.9.tgz
+tar zxvf docker-19.03.9.tgz
+mv docker/* /usr/bin
+```
+
+```shell
+#systemd管理docker
+cat > /usr/lib/systemd/system/docker.service << EOF
+[Unit]
+Description=Docker Application Container Engine
+Documentation=https://docs.docker.com
+After=network-online.target firewalld.service
+Wants=network-online.target
+[Service]
+Type=notify
+ExecStart=/usr/bin/dockerd
+ExecReload=/bin/kill -s HUP $MAINPID
+LimitNOFILE=infinity
+LimitNPROC=infinity
+LimitCORE=infinity
+TimeoutStartSec=0
+Delegate=yes
+KillMode=process
+Restart=on-failure
+StartLimitBurst=3
+StartLimitInterval=60s
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+```shell
+#创建配置文件
+mkdir /etc/docker
+cat > /etc/docker/daemon.json << EOF
+{
+  "registry-mirrors":["https://ach7yopc.mirror.aliyuncs.com"]
+}
+EOF
+
+#开启docker
+systemctl daemon-reload
+systemctl start docker
+systemctl enable docker
+```
+
+
+
+### 为apiserver自签证书
+
+自签CA和etcd相同，配置相同。
+
+```shell
+#自签CA
+cat > ca-config.json<< EOF 
+{ 
+  "signing": { 
+    "default": { 
+    	"expiry": "87600h" 
+     },
+  "profiles": { 
+    "kubernetes": { 
+      "expiry": "87600h", 
+      "usages": [ 
+        "signing",
+        "key encipherment", 
+        "server auth", 
+        "client auth" 
+        ] 
+      } 
+    } 
+  } 
+}
+EOF
+
+cat > ca-csr.json<< EOF 
+{ 
+  "CN": "kubernetes", 
+  "key": { 
+    "algo": "rsa", 
+    "size": 2048 
+  },
+  "names": [ 
+    { 
+    "C": "CN", 
+    "L": "Beijing", 
+    "ST": "Beijing",
+    "O": "k8s",
+    "OU": "System"
+    } 
+  ] 
+}
+EOF
+```
+
+```shell
+#证书生成
+cfssl gencert -initca ca-csr.json | cfssljson -bare ca
+```
+
+```shell
+#使用自签CA签发kuber-apiserver https证书
+cat > server-csr.json<< EOF
+{
+    "CN":"kubernetes",
+    "hosts":[
+        "10.0.0.1",
+        "127.0.0.1",
+        "192.168.1.14",
+        "192.168.1.15",
+        "192.168.1.16",
+        "192.168.1.17",
+        "192.168.1.18",
+        "192.168.1.19",
+        "192.168.1.20",
+        "kubernetes",
+        "kubernetes.default",
+        "kubernetes.default.svc",
+        "kubernetes.default.svc.cluster",
+        "kubernetes.default.svc.cluster.local"
+    ],
+    "key":{
+        "algo":"rsa",
+        "size":2048
+    },
+    "names":[
+        {
+            "C":"CN",
+            "L":"BeiJing",
+            "ST":"BeiJing",
+            "O":"k8s",
+            "OU":"System"
+        }
+    ]
+}
+EOF
+```
+
+```shell
+#生成证书
+cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -profile=kubernetes server-csr.json | cfssljson -bare server
+```
+
+### 部署master组件
+
+下载地址：
+
+https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.19.md#v1192
+
+```shell
+#解压 可执行文件apiserver scheduler controller-manager kubectl
+mkdir -p /opt/kubernetes/{bin,cfg,ssl,logs}
+tar zxvf kubernetes-server-linux-amd64.tar.gz
+cd kubernetes/server/bin
+cp kube-apiserver kube-scheduler kube-controller-manager /opt/kubernetes/bin
+cp kubectl /usr/bin/
+```
+
+```shell
+#apiserver配置文件
+cat > /opt/kubernetes/cfg/kube-apiserver.conf << EOF
+KUBE_APISERVER_OPTS="
+#启用日志
+--logtostderr=false \\
+#日志等级
+--v=2 \\
+#日志目录
+--log-dir=/opt/kubernetes/logs \\
+#etcd集群地址
+--etcd-servers=https://192.168.1.14:2379,https://192.168.1.15:2379,https://192.168.1.16:2379 \\
+#监听地址
+--bind-address=192.168.1.14 \\
+#https安全端口
+--secure-port=6443 \\
+#集群通告地址
+--advertise-address=192.168.31.71 \\
+#启用授权
+--allow-privileged=true \\
+#Service虚拟IP地址段
+--service-cluster-ip-range=10.0.0.0/24 \\
+#准入控制模块
+--enable-admission-plugins=NamespaceLifecycle,LimitRanger,ServiceAccount,ResourceQuota,NodeRestric tion \\
+#认证授权，启用RBAC授权和节点自管理
+--authorization-mode=RBAC,Node \\
+#启用TLS bootstrap机制
+--enable-bootstrap-token-auth=true \\
+#bootstrap token文件
+--token-auth-file=/opt/kubernetes/cfg/token.csv \\
+#Service nodeport类型默认分配端口范围
+--service-node-port-range=30000-32767 \\
+#apiserver访问kubelet客户端证书
+--kubelet-client-certificate=/opt/kubernetes/ssl/server.pem \\
+--kubelet-client-key=/opt/kubernetes/ssl/server-key.pem \\
+#apiserver https证书
+--tls-cert-file=/opt/kubernetes/ssl/server.pem \\
+--tls-private-key-file=/opt/kubernetes/ssl/server-key.pem \\
+--client-ca-file=/opt/kubernetes/ssl/ca.pem \\
+--service-account-key-file=/opt/kubernetes/ssl/ca-key.pem \\
+#连接etcd集群证书
+--etcd-cafile=/opt/etcd/ssl/ca.pem \\
+--etcd-certfile=/opt/etcd/ssl/server.pem \\
+--etcd-keyfile=/opt/etcd/ssl/server-key.pem \\
+#审计日志
+--audit-log-maxage=30 \\
+--audit-log-maxbackup=3 \\
+--audit-log-maxsize=100 \\
+--audit-log-path=/opt/kubernetes/logs/k8s-audit.log"
+EOF
+```
+
+```shell
+#将证书拷贝到配置路径
+cp ~/TLS/k8s/ca*pem ~/TLS/k8s/server*pem /opt/kubernetes/ssl/
+```
+
+
+
+### 部署node组件
+
+
+
+### 部署集群网络
 
 
 
@@ -253,3 +679,5 @@ mac下Paralles配置CentOS网络：https://www.cnblogs.com/ghj1976/p/3746375.htm
 环境搭建1：https://www.cnblogs.com/liuyi778/p/12771259.html
 
 环境搭建2：https://www.cnblogs.com/oscarli/p/12737409.html
+
+CFSSL证书生成：https://blog.csdn.net/sujosu/article/details/101520260
