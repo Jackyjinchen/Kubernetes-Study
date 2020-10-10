@@ -697,19 +697,11 @@ systemctl enable kube-apiserver
 ```
 
 ```shell
-#！！！！！！！！！！！！！！！！！！！！！！！！！
-#这里出现问题
-
-
 #授权kubelet-bootstrap用户允许请求证书
 kubectl create clusterrolebinding kubelet-bootstrap \
 --clusterrole=system:node-bootstrapper \
 --user=kubelet-bootstrap
 ```
-
-<img src="README.assets/image-20200927180549233.png" alt="image-20200927180549233" style="zoom:50%;" />
-
-这里出现问题！---------------------------------
 
 部署kube-controller-manager
 
@@ -753,7 +745,7 @@ systemctl start kube-controller-manager
 systemctl enable kube-controller-manager
 ```
 
-scheduler
+部署kube-scheduler
 
 ```shell
 cat > /opt/kubernetes/cfg/kube-scheduler.conf << EOF
@@ -786,11 +778,374 @@ systemctl start kube-scheduler
 systemctl enable kube-scheduler
 ```
 
+部署完成后可以查看集群运行状态
 
+```shell
+kubectl get cs
+```
+
+<img src="README.assets/image-20200927193044304.png" alt="image-20200927193044304" style="zoom:50%;" />
 
 ### 部署node组件
 
+在master节点下载的kubernetes中有kubelet和kube-proxy组件
 
+![image-20201009140824560](README.assets/image-20201009140824560.png)
+
+```shell
+#工作目录 在master节点操作
+mkdir -p /opt/kubernetes/{bin,cfg,ssl,logs}
+cd kubernetes/server/bin
+cp kubelet kube-proxy /opt/kubernetes/bin # 本地拷贝
+
+# 拷贝到每个node节点
+scp kubelet kube-proxy k8snode1:/opt/kubernetes/bin/
+scp kubelet kube-proxy k8snode2:/opt/kubernetes/bin/
+```
+
+#### 部署kubelet
+
+```shell
+#配置文件
+cat > /opt/kubernetes/cfg/kubelet.conf << EOF
+KUBELET_OPTS="--logtostderr=false \\
+--v=2 \\
+--log-dir=/opt/kubernetes/logs \\
+#显示名称，集群中唯一
+--hostname-override=k8smaster \\
+#启用CNI插件
+--network-plugin=cni \\
+#用于连接apiserver
+--kubeconfig=/opt/kubernetes/cfg/kubelet.kubeconfig \\
+#首次启动向apiserver申请证书
+--bootstrap-kubeconfig=/opt/kubernetes/cfg/bootstrap.kubeconfig \\
+#配置参数文件
+--config=/opt/kubernetes/cfg/kubelet-config.yml \\
+#kubelet证书生成目录
+--cert-dir=/opt/kubernetes/ssl \\
+#管理Pod网络容器的镜像
+--pod-infra-container-image=mirrorgooglecontainers/pause-amd64:3.0"
+EOF
+```
+
+```yml
+cat > /opt/kubernetes/cfg/kubelet-config.yml << EOF
+kind: KubeletConfiguration
+apiVersion: kubelet.config.k8s.io/v1beta1
+address: 0.0.0.0
+port: 10250
+readOnlyPort: 10255
+cgroupDriver: cgroupfs
+clusterDNS:
+- 10.0.0.2
+clusterDomain: cluster.local 
+failSwapOn: false
+authentication:
+  anonymous:
+    enabled: false
+  webhook:
+    cacheTTL: 2m0s
+    enabled: true
+  x509:
+    clientCAFile: /opt/kubernetes/ssl/ca.pem 
+authorization:
+  mode: Webhook
+  webhook:
+    cacheAuthorizedTTL: 5m0s
+    cacheUnauthorizedTTL: 30s
+evictionHard:
+  imagefs.available: 15%
+  memory.available: 100Mi
+  nodefs.available: 10%
+  nodefs.inodesFree: 5%
+maxOpenFiles: 1000000
+maxPods: 110
+EOF
+```
+
+```shell
+# bootstrap.kubeconfig
+KUBE_APISERVER="https://192.168.1.14:6443" # apiserver IP:PORT
+TOKEN="38c9abdf7eea167c6526158f19475b2d" # 与token.csv里保持一致
+
+cd /root/TLS/k8s
+
+# 生成 kubelet bootstrap kubeconfig 配置文件
+kubectl config set-cluster kubernetes \
+  --certificate-authority=/opt/kubernetes/ssl/ca.pem \
+  --embed-certs=true \
+  --server=${KUBE_APISERVER} \
+  --kubeconfig=bootstrap.kubeconfig
+  
+kubectl config set-credentials "kubelet-bootstrap" \
+  --token=${TOKEN} \
+  --kubeconfig=bootstrap.kubeconfig
+  
+kubectl config set-context default \
+  --cluster=kubernetes \
+  --user="kubelet-bootstrap" \
+  --kubeconfig=bootstrap.kubeconfig
+  
+kubectl config use-context default --kubeconfig=bootstrap.kubeconfig
+```
+
+```shell
+#拷贝配置文件路径
+cp /root/TLS/k8s/bootstrap.kubeconfig /opt/kubernetes/cfg
+```
+
+```shell
+# systemd 管理 kubelet
+cat > /usr/lib/systemd/system/kubelet.service << EOF
+[Unit]
+Description=Kubernetes Kubelet
+After=docker.service
+[Service]
+EnvironmentFile=/opt/kubernetes/cfg/kubelet.conf
+ExecStart=/opt/kubernetes/bin/kubelet \$KUBELET_OPTS
+Restart=on-failure
+LimitNOFILE=65536
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+```shell
+# 启动服务
+systemctl daemon-reload
+systemctl start kubelet
+systemctl enable kubelet
+```
+
+批准kubelet证书申请并加入集群
+
+```shell
+# 查看kubelet证书请求
+kubectl get csr
+# 批准申请
+kubectl certificate approve xxxxxxxxxxx
+# 查看节点
+kubectl get node
+```
+
+由于未部署网络插件，节点回没有准备就绪NotReady
+
+<img src="README.assets/image-20201009145918479.png" alt="image-20201009145918479"  />
+
+#### 部署kube-proxy
+
+```shell
+# 配置文件
+cat > /opt/kubernetes/cfg/kube-proxy.conf << EOF
+KUBE_PROXY_OPTS="--logtostderr=false \\
+--v=2 \\
+--log-dir=/opt/kubernetes/logs \\
+--config=/opt/kubernetes/cfg/kube-proxy-config.yml"
+EOF
+```
+
+```yaml
+# 配置yml
+cat > /opt/kubernetes/cfg/kube-proxy-config.yml << EOF
+kind: KubeProxyConfiguration
+apiVersion: kubeproxy.config.k8s.io/v1alpha1
+bindAddress: 0.0.0.0
+metricsBindAddress: 0.0.0.0:10249
+clientConnection:
+	kubeconfig: /opt/kubernetes/cfg/kube-proxy.kubeconfig
+hostnameOverride: k8smaster
+clusterCIDR: 10.0.0.0/24
+EOF
+```
+
+```shell
+# 生成kube-proxy证书
+# 切换工作目录
+cd /usr/local/bin/k8s
+
+# 创建证书请求文件
+cat > kube-proxy-csr.json << EOF
+{
+  "CN": "system:kube-proxy",
+  "hosts": [],
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [
+    {
+      "C": "CN",
+      "L": "BeiJing",
+      "ST": "BeiJing",
+      "O": "k8s",
+      "OU": "System"
+    }
+  ]
+}
+EOF
+
+# 生成证书
+cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -profile=kubernetes kube-proxy-csr.json | cfssljson -bare kube-proxy
+
+ls kube-proxy*pem
+# kube-proxy-key.pem  kube-proxy.pem
+```
+
+```shell
+# kubeconfig文件
+KUBE_APISERVER="https://192.168.1.14:6443"
+
+cd /root/TLS/k8s
+
+kubectl config set-cluster kubernetes \
+  --certificate-authority=/opt/kubernetes/ssl/ca.pem \
+  --embed-certs=true \
+  --server=${KUBE_APISERVER} \
+  --kubeconfig=kube-proxy.kubeconfig
+  
+kubectl config set-credentials kube-proxy \
+  --client-certificate=./kube-proxy.pem \
+  --client-key=./kube-proxy-key.pem \
+  --embed-certs=true \
+  --kubeconfig=kube-proxy.kubeconfig
+  
+kubectl config set-context default \
+  --cluster=kubernetes \
+  --user=kube-proxy \
+  --kubeconfig=kube-proxy.kubeconfig
+  
+  
+kubectl config use-context default --kubeconfig=kube-proxy.kubeconfig
+```
+
+```shell
+# 拷贝配置文件
+cp /root/TLS/k8s/kube-proxy.kubeconfig /opt/kubernetes/cfg/
+```
+
+```shell
+# systemd管理kube-proxy
+cat > /usr/lib/systemd/system/kube-proxy.service << EOF
+[Unit]
+Description=Kubernetes Proxy
+After=network.target
+[Service]
+EnvironmentFile=/opt/kubernetes/cfg/kube-proxy.conf
+ExecStart=/opt/kubernetes/bin/kube-proxy \$KUBE_PROXY_OPTS
+Restart=on-failure
+LimitNOFILE=65536
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+```shell
+# 启动kube-proxy
+systemctl daemon-reload
+systemctl start kube-proxy
+systemctl enable kube-proxy
+```
+
+#### 部署CNI网络
+
+```shell
+mkdir -p /opt/cni/bin
+tar zxvf cni-plugins-linux-amd64-v0.8.6.tgz -C /opt/cni/bin
+
+# 地址无法访问，添加IP地址
+sudo vi /etc/hosts
+199.232.28.133 raw.githubusercontent.com
+
+wget https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+kubectl apply -f kube-flannel.yml
+
+kubectl get pods -n kube-system
+```
+
+![image-20201009162031510](README.assets/image-20201009162031510.png)
+
+授权apiserver访问kubelet
+
+```shell
+cat > apiserver-to-kubelet-rbac.yaml << EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  annotations:
+    rbac.authorization.kubernetes.io/autoupdate: "true"
+  labels:
+    kubernetes.io/bootstrapping: rbac-defaults
+  name: system:kube-apiserver-to-kubelet
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - nodes/proxy
+      - nodes/stats
+      - nodes/log
+      - nodes/spec
+      - nodes/metrics
+      - pods/log
+    verbs:
+      - "*"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: system:kube-apiserver
+  namespace: ""
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:kube-apiserver-to-kubelet
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: kubernetes
+EOF
+
+kubectl apply -f apiserver-to-kubelet-rbac.yaml
+```
+
+```shell
+# 增加新的Node节点
+scp -r /opt/kubernetes k8snode2:/opt/
+scp -r /usr/lib/systemd/system/{kubelet,kube-proxy}.service k8snode2:/usr/lib/systemd/system
+scp -r /opt/cni/ k8snode2:/opt/
+scp /opt/kubernetes/ssl/ca.pem k8snode2:/opt/kubernetes/ssl
+
+# 证书申请审批后自动生成，删除重新生成
+rm /opt/kubernetes/cfg/kubelet.kubeconfig 
+rm -f /opt/kubernetes/ssl/kubelet*
+
+# 修改主机名
+vi /opt/kubernetes/cfg/kubelet.conf
+--hostname-override=k8snode1
+vi /opt/kubernetes/cfg/kube-proxy-config.yml
+hostnameOverride: k8snode1
+```
+
+```shell
+# 启动kubelet和kube-proxy
+systemctl daemon-reload
+systemctl start kubelet
+systemctl enable kubelet
+systemctl start kube-proxy
+systemctl enable kube-proxy
+```
+
+在master批准node kubelet证书申请
+
+```shell
+kubectl get csr
+kubectl certificate approve xxxxxxxxx
+```
+
+![image-20201009164852737](README.assets/image-20201009164852737.png)
+
+查看Node状态，各个节点已正常运行中
+
+![image-20201009175112902](README.assets/image-20201009175112902.png)
 
 ### 部署集群网络
 
