@@ -227,7 +227,7 @@ Node组件：flannel-ds、proxy
 # 新建一个nginx pod
 $ kubectl create deployment nginx --image=nginx
 $ kubectl expose deployment nginx --port=80 --type=NodePort
-$ kubectl get pod,sv
+$ kubectl get pod,svc
 ```
 
 <img src="README.assets/image-20200918101450417.png" alt="image-20200918101450417" style="zoom:33%;" />
@@ -605,6 +605,8 @@ cp kube-apiserver kube-scheduler kube-controller-manager /opt/kubernetes/bin
 cp kubectl /usr/bin/
 ```
 
+#### 部署apiserver
+
 ```shell
 #apiserver配置文件
 cat > /opt/kubernetes/cfg/kube-apiserver.conf << EOF
@@ -660,7 +662,7 @@ EOF
 cp ~/TLS/k8s/ca*pem ~/TLS/k8s/server*pem /opt/kubernetes/ssl/
 ```
 
-### TLS Bootstraping
+#### TLS Bootstraping
 
 Master apiserver 启用 TLS 认证后，Node 节点 kubelet 和 kube-proxy 要与 kube-apiserver 进行通信，必须使用 CA 签发的有效证书才可以，当 Node 节点很多时，这种客户端证书颁发需要大量工作，同样也会增加集群扩展复杂度。为了简化流程，Kubernetes 引入了 TLS bootstraping 机制来自动颁发客户端证书，kubelet 会以一个低权限用户自动向 apiserver 申请证书，kubelet 的证书由 apiserver 动态签署。
 
@@ -703,7 +705,7 @@ kubectl create clusterrolebinding kubelet-bootstrap \
 --user=kubelet-bootstrap
 ```
 
-部署kube-controller-manager
+#### 部署kube-controller-manager
 
 ```shell
 cat > /opt/kubernetes/cfg/kube-controller-manager.conf << EOF
@@ -745,7 +747,7 @@ systemctl start kube-controller-manager
 systemctl enable kube-controller-manager
 ```
 
-部署kube-scheduler
+#### 部署kube-scheduler
 
 ```shell
 cat > /opt/kubernetes/cfg/kube-scheduler.conf << EOF
@@ -1048,7 +1050,10 @@ systemctl enable kube-proxy
 
 #### 部署CNI网络
 
+<img src="README.assets/image-20201012092553894.png" alt="image-20201012092553894" style="zoom:33%;" />
+
 ```shell
+# https://github.com/containernetworking/plugins/releases/download/v0.8.6/cni-plugins-linux-amd64-v0.8.6.tgz
 mkdir -p /opt/cni/bin
 tar zxvf cni-plugins-linux-amd64-v0.8.6.tgz -C /opt/cni/bin
 
@@ -1147,7 +1152,543 @@ kubectl certificate approve xxxxxxxxx
 
 ![image-20201009175112902](README.assets/image-20201009175112902.png)
 
-### 部署集群网络
+## 基本概念
+
+### kubectl命令行工具
+
+```shell
+# 帮助
+kubectl --help
+# 创建pod例子
+kubectl create deployment nginx --image=nginx
+# 暴露端口
+kubectl expose deployment nginx --port=80 --type=NodePort
+# 查看端口信息
+kubectl get pod,svc
+# 查看组件状态
+kubectl get cs
+# 查看节点运行状态
+kubectl get nodes
+```
+
+### yaml文件
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+  namespace: default
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+      image: nginx:1.15
+      port:
+      - containerPort: 80
+```
+
+|    名称    | 内容       |    名称    | 美容       |
+| :--------: | ---------- | :--------: | ---------- |
+| apiversion | API版本    |    kind    | 资源类型   |
+|  metadata  | 资源元数据 |    spec    | 资源规格   |
+|  replicas  | 副本数量   |  selector  | 标签选择器 |
+|  template  | Pod模板    |  metadata  | Pod元数据  |
+|    spec    | Pod规格    | containers | 容器配置   |
+
+#### create生成yaml文件
+
+```shell
+# 生成yaml文件
+kubectl create deployment web --image=nginx -o yaml --dry-run > my1.yaml
+```
+
+#### get导出yaml文件
+
+```shell
+# 已部署好的项目
+kubectl get deploy
+# 导出yaml
+kubectl get deploy nginx -o=yaml --export > my2.yaml
+```
+
+### Pod
+
+多进程设计——最小部署单元，可包含多个容器(一组容器的集合)，一个pod中容器共享网络命名空间。
+
+<img src="README.assets/image-20201010113017008.png" alt="image-20201010113017008" style="zoom:33%;" />
+
+1、共享网络：通过Pause容器，把其他业务容器加入Pause容器中，同一个名称空间网络共享
+
+2、共享存储：数据卷加载，持久化存储
+
+<img src="README.assets/image-20201010112744244.png" alt="image-20201010112744244" style="zoom:33%;" />
+
+#### Pod镜像拉取策略
+
+```yaml
+spec.containers[].imagePullPolicy: Always
+     # IfNotPresent: 默认，镜像在宿主机不存在时才拉去
+     # Always: 每次创建Pod都重新拉取
+     # Never: Pod永远不会主动拉取这个镜像
+```
+
+#### Pod资源限制(由docker实现的)
+
+```yaml
+# 限制
+spec.containers[].resources.limits.cpu: "500m" # 1核心=500m
+spec.containers[].resources.limits.memory: "64Mi"
+# 请求
+spec.containers[].resources.requests.cpu
+spec.containers[].resources.requests.memory
+```
+
+#### Pod重启策略
+
+```yaml
+# Always: 容器中只推出后，总是重启
+# OnFailure: 容器异常退出（退出状态码非0）时重启
+# Never: 终止退出从不重启
+spec.restartPolicy: Never
+```
+
+#### Pod健康检查
+
+```yaml
+# 应用层面健康检查
+# livenessProbe 存活检查 检查失败杀死容器，根据Pod的restartPolicy才做
+# readinessProbe 就绪检查 检查失败将Pod从service endpoints中剔除
+spec.containers[].livenessProbe:
+  exec:
+    command:
+    - cat
+    - /tmp/healthy
+  imitialDelaySeconds: 5
+  periodSecounds: 5
+
+# Probe支持三种检查方法：
+#    httpGet 发送请求，返回200-400为成功
+#    exec 执行shell命令返回状态吗0为成功
+#    tcpSocket 发起TCP Socket建立成功
+```
+
+#### Pod调度策略
+
+<img src="README.assets/20190212152842_109.jpg" alt="clipboard.png" style="zoom:50%;" />
+
+Pod创建过程：
+
+	1. Createpod -- apiserver -- etcd
+ 	2. scheduler -- apiserver -- etcd -- 调度算法，把pod调度某个node节点上
+ 	3. node节点kubelet -- apiserver --读取etcd拿到分配给当前节点pod -- docker创建容器
+
+
+
+##### 标签选择器nodeSelector
+
+```shell
+# 指定分组
+kubectl label node k8snode1 env_role=dev
+# 显示标签信息
+kubectl get nodes k8snode1 --show-labels
+```
+
+```yaml
+# 配置节点选择器
+spec.nodeSelector.env_role: dev
+```
+
+
+
+##### 节点亲和性nodeAffinity
+
+```yaml
+spec:
+  affinity:
+    nodeAffinity:
+      # 硬亲和性 必须满足约束条件
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions: # 必须满足env_role为dev或者test
+          - key: env_role
+            operator: In
+            values:
+            - dev
+            - test
+       # 软亲和性 不保证满足约束条件
+       preferredDuringSchedulingIgnoredDuringExecution:
+       - weight: 1 # 权重系数
+         preference:
+           matchExpressions: # 尝试满足，不保证绝对，若不存在依旧进行调度
+           - key: group
+             operator: In
+             values:
+             - otherprod
+             
+# 操作符 operator:
+#		In 范围
+#   NotIn 不在范围
+#	  Exists 存在
+#	  Gt 大于
+#   Lt 小于
+#	  DoesNotExists 不存在   
+```
+
+
+
+##### 污点和污点容忍Taint
+
+nodeSelector和nodeAffinity为Pod属性，调度时实现。Taint节点不做普通分配调度，是节点的属性
+
+场景：专用节点/配置特定硬件节点/基于Taint驱逐
+
+污点：
+
+```shell
+# 查看节点污点情况
+kubectl describe node k8smaster | grep Taint
+#三个值：
+#   NoSchedule: 一定不被调度
+#   PreferNoSchedule: 尽量不被调度
+#   NoExecute: 不会调度，并且驱逐Node已有Pod
+
+# 为节点添加污点
+kubectl taint node [node] key=value:污点值
+# 删除污点
+kubectl taint node [node] key=value:污点值-
+```
+
+污点容忍：（类似于软亲和性）
+
+```yaml
+spec:
+  tolerations:
+  - key: "env_role"
+    operator: "Equal"
+    value: "value"
+    effect: "NoSchedule"
+```
+
+
+
+### Controller
+
+#### Controller (Deployment)
+
+在集群上管理和运行容器的对象，也叫做**工作负载**
+
+
+
+##### Deployment 
+
+应用场景：
+
+​	部署无状态应用
+
+​	管理Pod和ReplicaSet
+
+​	部署、滚动升级等功能
+
+​	应用场景：web服务、微服务
+
+Pod和Controller通过**标签labels**建立联系，实现运维操作如伸缩、滚动升级等
+
+![image-20201010163224750](README.assets/image-20201010163224750.png)
+
+```shell
+# 生成yaml文件
+kubectl create deployment web --image=nginx --dry-run -o yaml > web.yaml
+# 应用部署
+kubectl apply -f web.yaml
+kubectl get pods
+# 生成暴露端口的yaml文件
+kubectl expose deployment web --port=80 --type=NodePort --target-port=80 --name=web1 -o yaml > web1.yaml
+# svc->service
+kubectl get pod,svc
+```
+
+升级、回滚、弹性伸缩
+
+```shell
+# 将nginx升级到1.15版本
+kubectl set image deployment web nginx=nginx:1.15
+# 查看应用升级状态
+kubectl rollout status deployment web
+# 查看历史变化
+kubectl rollout history deployment web
+# 回滚
+kubectl rollout undo deployment web
+kubectl roolout undo deployment web --to-reversion=1
+# 弹性伸缩(在线扩容)
+kubectl scale deployment web --replicas=10
+```
+
+
+
+##### Service
+
+定义一组Pod的访问规则，Service和Pod通过labels和selector标签建立关系。
+
+1. 防止Pod失联（服务发现）
+2. 定义一组Pod访问策略（负载均衡）
+
+**常用类型**
+
+​	ClusterIP：集群内部使用（默认）
+
+​	NodePort：对外访问应用使用
+
+​	LoadBalancer：对外访问，公有云
+
+```shell
+# 修改方式:
+spec.type: NodePort
+
+# 生成yaml文件
+kubectl create deployment web --image=nginx --dry-run -o yaml > web.yaml
+# 应用部署
+kubectl apply -f web.yaml
+# 端口暴露
+kubectl expose deployment web --port=80 --target-port=80 --dry-run -o yaml > service.yaml
+# apply
+kubectl apply -f service.yaml
+
+```
+
+
+
+#### Controller (StatefulSet)
+
+无状态：Pod相同，没有顺序要求，无需考虑在哪个node中运行，随意伸缩和扩展
+
+有状态：每个pod独立，保持启动顺序和唯一性（唯一的网络标示符），持久存储，有序（例如mysql主从）
+
+##### 部署有状态应用
+
+无头service：ClusterIP : none
+
+```yaml
+apiVersion: v1
+kind: Service #无头service
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+spec:
+  ports:
+  - port: 80
+    name: web
+  clusterIP: None #None配置
+  selector:
+    app: nginx
+---
+apiVersion: apps/v1
+kind: StatefulSet #有状态应用敷在管理控制器API
+metadata:
+  name: web-statefulset #名称
+  namespace: default #名称空间
+spec:
+  serviceName: "nginx"
+  replicas: 2
+  selector:
+     matchLabels:
+       app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: docker.io/nginx
+        ports:
+        - containerPort: 80
+          name: web
+        volumeMounts:
+        - name: www
+          mountPath: /usr/share/nginx/html
+  volumeClaimTemplates:
+  - metadata:
+      name: www
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      volumeMode: Filesystem
+      resources:
+        requests:
+          storage: 50Mi
+      storageClassName: local-storage
+```
+
+Deployment和StatefulSet区别：有身份的（唯一标示）
+
+​	根据主机名和一定规则生成域名：**主机名.service名称.名称空间.svc.cluster.local**
+
+​	web-statefulset-0.web.default.svc.cluster.local
+
+
+
+#### Controller (DaemonSet)
+
+守护进程：确保node运行同一个pod
+
+```yaml
+kind: DaemonSet #守护
+```
+
+启动并进入守护进程：
+
+```shell
+# 部署守护进程
+kubectl apply -f test.yml
+# 进入pod之中
+kubectl exec -it [Pod名] bash
+```
+
+
+
+#### Controller (Job)
+
+job：一次性任务 / cronjob：定时任务
+
+```yaml
+apiVersion: batch/v1
+kind: Job #一次性任务将结果logs打出
+metadata:
+  name: pi
+spec:
+  template:
+    spec:
+      containers:
+      - name: pi
+        image: perl
+        command: ["perl", "-Mbignum=bpi", "-wle", "print bpi(2000)"]
+      restartPolicy: Never
+  backoffLimit: 4
+```
+
+查看任务执行情况
+
+```shell
+kubectl logs [服务名]
+```
+
+![image-20201019122228919](README.assets/image-20201019122228919.png)
+
+执行后任务显示Completed
+
+```shell
+kubectl delete -f job.yaml
+```
+
+
+
+#### Controller (CronJob)
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: hello
+spec:
+  schedule: "*/1 * * * *" #cron表达式
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: hello
+            image: busybox
+            args:
+            - /bin/sh
+            - -c
+            - date; echo Hello from the Kubernetes cluster
+          restartPolicy: OnFailure
+```
+
+
+
+### Secret
+
+对数据进行加密，存储在etcd中，让pod容器以挂载volume的方式进行访问。
+
+```shell
+# 输出base64加密后的admin
+echo -n 'admin' | base64
+```
+
+场景：凭证，base64编码
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysecret
+type: Opaque
+data:
+  username: [加密后用户名]
+  password: [加密后密码]
+```
+
+```shell
+# 创建secret
+kubectl create -f secret.yaml
+```
+
+#### 以变量形式挂载
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mypod
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    env:
+      - name: SECRET_USERNAME
+        valueFrom:
+          secretKeyRef: # 变量挂载
+            name: mysecret
+            key: username
+      - name: SECRET_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: mysecret
+            key: password
+```
+
+```shell
+# 创建pod
+kubectl apply -f secret-val.yaml
+# 进入pod
+kubectl exec -it mypod bash
+# 输出变量
+echo $SECRET_USERNAME
+```
+
+
+
+
+
+#### 以volume形式挂载
+
+```shell
+
+```
+
+
+
+
 
 
 
