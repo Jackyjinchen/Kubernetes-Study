@@ -1676,15 +1676,599 @@ kubectl exec -it mypod bash
 echo $SECRET_USERNAME
 ```
 
-
-
-
-
 #### 以volume形式挂载
 
-```shell
-
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mypod
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    volumeMounts: #卷挂载
+    - name: foo
+      mountPath: "/etc/foo"
+      readOnly: true
+  volumes:
+  - name: foo
+    secret:
+      secretName: mysecret
 ```
+
+```shell
+# 创建pod
+kubectl apply -f secret-vol.yaml
+# 进入容器
+kubectl exec -it mypod bash
+# 查看挂载的变量
+cd /etc/foo
+cat password
+```
+
+
+
+### ConfigMap配置管理
+
+存储不加密数据到etcd中，pod以变量或数据卷挂载，多用于配置文件
+
+```shell
+# 创建configmap
+kubectl create configmap redis-config --from-file=redis.properties
+# 查看configmap
+kubectl get cm
+kubectl describe cm redis-config
+```
+
+#### volume挂载
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mypod
+spec:
+  containers:
+  - name: busybox
+    image: busybox
+    command: ["/bin/sh", "-c", "cat /etc/config/redis.properties"]
+    volumeMounts: #卷挂载
+    - name: config-volume
+      mountPath: /etc/config
+  volumes:
+  - name: config-volume
+    configMap:  #configmap名称挂载
+      name: redis-config
+  restartPolicy: Never
+```
+
+```shell
+# 查看日志
+kubectl logs mypod
+```
+
+#### 变量挂载
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: myconfig
+  namespace: default
+data: #数据部分
+  special.level: info
+  special.type: hello
+```
+
+```shell
+kubectl apply -f myconfig.yaml
+kubectl get cm
+```
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mypod
+spec:
+  containers:
+  - name: busybox
+    image: busybox
+    command: ["/bin/sh", "-c", "echo $(LEVEL) $(TYPE)"]
+    env:
+      - name: LEVEL
+        valueFrom:
+          configMapKeyRef: #变量挂载
+            name: myconfig
+            key: special.level
+      - name: TYPE
+        valueFrom:
+          configMapKeyRef:
+            name: myconfig
+            key: special.type
+  restartPolicy: Never
+```
+
+
+
+### K8S集群安全机制
+
+访问k8s集群时，需要经过三个步骤：
+
+1. 认证
+2. 鉴权（授权）
+3. 准入控制
+
+<img src="README.assets/1.png" alt="image.png" style="zoom: 67%;" />
+
+均需要经过apiserver ---- 统一协调
+
+**传输安全**：对外不暴露8080端口，只能内部访问。对外使用端口6443
+
+**认证**：客户端认证常用方式：
+
+​	https证书认证，基于ca证书
+
+​	http token认证，通过token识别用户
+
+​	http基本认证，用户名+密码
+
+**鉴权**：基于RBAC（基于角色的访问控制）鉴权
+
+**准入控制**：准入列表，存在则通过，否则拒绝。
+
+
+
+#### RBAC
+
+Role-Based Access Control  基于角色的访问控制
+
+<img src="README.assets/1582958446712-2f30fb74-4b1c-4787-805b-d84186a40380.png" alt="image.png" style="zoom:50%;" />
+
+**角色**：
+
+​	role：特定命名空间访问
+
+​	clusterrole：所有命名空间访问权限
+
+**角色绑定**：
+
+​	roleBinding：角色绑定到主体
+
+​	clusterRoleBinding：集群角色绑定到主体
+
+**RBAC实现鉴权**：
+
+1. 创建命名空间并创建pod
+
+```shell
+# 创建命名空间
+kubectl create ns roledemo
+# 查看命名空间
+kubectl get ns
+# 在命名空间下创建pod
+kubectl run nginx --image=nginx -n roledemo
+```
+
+2. 创建角色
+
+```yaml
+# 角色yaml
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  namespace: roledemo
+  name: pod-reader
+rules:
+- apiGroups: [""] # ""表示core API group
+  resources: ["pods"] # 仅对pods有操作权限
+  verbs: ["get", "watch", "list"]
+```
+
+```shell
+# 创建角色
+kubectl apply -f rbac-role.yaml
+kubectl get role -n roledemo
+```
+
+3. 创建角色与用户绑定
+
+```yaml
+# 用户yaml
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: read-pods
+  namespace: roletest
+subjects:
+- kind: User
+  name: lucy
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role # Role或者ClusterRole
+  name: pod-reader #绑定的Role名字
+  apiGroup: rbac.authorization.k8s.io
+```
+
+```shell
+# 绑定用户与角色
+kubectl apply -f rbac-rolebinding.yaml
+# 获取绑定值
+kubectl get role,rolebinding -n roledemo
+```
+
+4. 角色证书
+
+```sh
+# 和前述相同，生成证书文件
+cat > lucy-csr.json<< EOF
+cfssl gencert -initca ca-csr.json | cfssljson -bare ca
+# ......
+```
+
+
+
+### Ingress
+
+原先方式：暴露端口，ip+端口号访问：使用Service中的NodePort类型，每个节点都会启动端口。
+
+**Ingress作为统一入口**，由service关联一组pod
+
+<img src="README.assets/image-20201021095748558.png" alt="image-20201021095748558" style="zoom: 40%;" />
+
+1. **部署ingress Controller**
+
+```shell
+# 构建nginx应用
+kubectl create deployment web --image=nginx
+# expose暴露端口
+kubectl expose deployment web --port=80 --target-port=80 --type=NodePort
+```
+
+**部署官方维护的ingress controller（nginx）**
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+
+---
+
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: nginx-configuration
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: tcp-services
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: udp-services
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nginx-ingress-serviceaccount
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRole
+metadata:
+  name: nginx-ingress-clusterrole
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+      - endpoints
+      - nodes
+      - pods
+      - secrets
+    verbs:
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - "extensions"
+    resources:
+      - ingresses
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  - apiGroups:
+      - "extensions"
+    resources:
+      - ingresses/status
+    verbs:
+      - update
+
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: Role
+metadata:
+  name: nginx-ingress-role
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+      - pods
+      - secrets
+      - namespaces
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      # Defaults to "<election-id>-<ingress-class>"
+      # Here: "<ingress-controller-leader>-<nginx>"
+      # This has to be adapted if you change either parameter
+      # when launching the nginx-ingress-controller.
+      - "ingress-controller-leader-nginx"
+    verbs:
+      - get
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - create
+  - apiGroups:
+      - ""
+    resources:
+      - endpoints
+    verbs:
+      - get
+
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: RoleBinding
+metadata:
+  name: nginx-ingress-role-nisa-binding
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nginx-ingress-role
+subjects:
+  - kind: ServiceAccount
+    name: nginx-ingress-serviceaccount
+    namespace: ingress-nginx
+
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  name: nginx-ingress-clusterrole-nisa-binding
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nginx-ingress-clusterrole
+subjects:
+  - kind: ServiceAccount
+    name: nginx-ingress-serviceaccount
+    namespace: ingress-nginx
+
+---
+
+apiVersion: apps/v1
+kind: DaemonSet 
+metadata:
+  name: nginx-ingress-controller
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ingress-nginx
+      app.kubernetes.io/part-of: ingress-nginx
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ingress-nginx
+        app.kubernetes.io/part-of: ingress-nginx
+      annotations:
+        prometheus.io/port: "10254"
+        prometheus.io/scrape: "true"
+    spec:
+      hostNetwork: true
+      serviceAccountName: nginx-ingress-serviceaccount
+      containers:
+        - name: nginx-ingress-controller
+          image: siriuszg/nginx-ingress-controller:0.20.0
+          args:
+            - /nginx-ingress-controller
+            - --configmap=$(POD_NAMESPACE)/nginx-configuration
+            - --tcp-services-configmap=$(POD_NAMESPACE)/tcp-services
+            - --udp-services-configmap=$(POD_NAMESPACE)/udp-services
+            - --publish-service=$(POD_NAMESPACE)/ingress-nginx
+            - --annotations-prefix=nginx.ingress.kubernetes.io
+          securityContext:
+            allowPrivilegeEscalation: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_BIND_SERVICE
+            # www-data -> 33
+            runAsUser: 33
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: http
+              containerPort: 80
+            - name: https
+              containerPort: 443
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /healthz
+              port: 10254
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 10
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /healthz
+              port: 10254
+              scheme: HTTP
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress-nginx
+  namespace: ingress-nginx
+spec:
+  #type: NodePort
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+    protocol: TCP
+  - name: https
+    port: 443
+    targetPort: 443
+    protocol: TCP
+  selector:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+```
+
+<img src="README.assets/image-20201021111104523.png" alt="image-20201021111104523" style="zoom:50%;" />
+
+2. **创建ingress规则**
+
+````yaml
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress # ingress规则
+metadata:
+  name: example-ingress
+spec:
+  rules: # 规则
+  - host: example.ingredemo.com # 访问域名
+    http:
+      paths:
+      - path: /
+        backend:
+          serviceName: web # 应用名称
+          servicePort: 80  # 端口
+````
+
+采用v1版本：
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: example-ingress
+spec:
+  rules:
+  - host: foo.bar.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: web
+            port:
+              number: 80
+```
+
+<img src="README.assets/image-20201021144338729.png" alt="image-20201021144338729" style="zoom:50%;" />
+
+在本机配置host文件：
+
+```shell
+sudo vi /etc/hosts
+# 在host文件中加入
+192.168.1.14	example.ingredemo.com
+```
+
+可直接通过域名访问：
+
+<img src="README.assets/image-20201021145835896.png" alt="image-20201021145835896" style="zoom:50%;" />
 
 
 
@@ -1701,3 +2285,5 @@ mac下Paralles配置CentOS网络：https://www.cnblogs.com/ghj1976/p/3746375.htm
 环境搭建2：https://www.cnblogs.com/oscarli/p/12737409.html
 
 CFSSL证书生成：https://blog.csdn.net/sujosu/article/details/101520260
+
+K8S安全机制：https://www.cnblogs.com/benjamin77/p/12446780.html
