@@ -96,6 +96,8 @@ sudo vi /etc/sysconfig/network-scripts/ifcfg-eth0
 
 # 将其中的ONBOOT改为yes
 ONBOOT=yes
+# 查询ip地址
+ip addr
 ```
 
 采用FinalShell进行SSH连接，配置三台服务器(一个Master，两个Node)
@@ -168,8 +170,8 @@ EOF
 4、安装kubeadm、kubelet和kubectl
 
 ```shell
-$ yum install -y kubelet-1.18.0 kubeadm-1.18.0 kubectl-1.18.0
-$ systemctl enable kubelet
+yum install -y kubelet-1.18.0 kubeadm-1.18.0 kubectl-1.18.0
+systemctl enable kubelet
 ```
 
 ### 部署Master节点
@@ -1153,6 +1155,10 @@ kubectl certificate approve xxxxxxxxx
 ![image-20201009175112902](README.assets/image-20201009175112902.png)
 
 ## 基本概念
+
+### K8S内部关系
+
+![image-20201022092915158](README.assets/image-20201022092915158.png)
 
 ### kubectl命令行工具
 
@@ -2269,6 +2275,1055 @@ sudo vi /etc/hosts
 可直接通过域名访问：
 
 <img src="README.assets/image-20201021145835896.png" alt="image-20201021145835896" style="zoom:50%;" />
+
+
+
+### Helm
+
+**Kubernetes包管理工具**
+
+原部署应用方式编写yaml文件： Deployment ---- Service 暴露端口 ---- Ingress
+
+**需要维护大量yaml文件**，不利于版本管理，利用helm进行yaml整体管理及复用；应用级别的版本管理。
+
+1. Helm
+
+命令行客户端工具，用于k8s应用chart的创建、打包、发布和管理。
+
+2. Chart
+
+应用描述，一系列用于描述k8s资源相关文件的集合。
+
+3. Release
+
+基于Chart的部署实体，chart被运行后生成对应的release，在k8s中创建真实运行的资源对象。
+
+**Helm架构变化：**
+
+v3删除tiller；release可在不同命名空间中重用；chart推送到docker仓库中
+
+<img src="README.assets/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3dlaXhpbl80NTQxMzYwMw==,size_16,color_FFFFFF,t_70.png" alt="123" style="zoom: 67%;" />
+
+**Helm下载**
+
+```shell
+wget https://get.helm.sh/helm-v3.3.4-linux-amd64.tar.gz
+tar -zxvf helm-v3.3.4-linux-amd64.tar.gz
+mv linux-amd64/helm /usr/local/bin/helm
+# 配置helm仓库
+helm repo add stable https://kubernetes.oss-cn-hangzhou.aliyuncs.com/charts
+helm repo list
+```
+
+**Helm部署操作**
+
+```shell
+helm search repo 名称
+helm install 安装名 搜索的应用名
+helm list
+helm status 安装名
+# 修改yaml后应用升级
+helm upgrade web mychart/
+# 暴露端口
+kubectl edit svc 服务名 # 在yaml文件中修改类型为type: NodePort
+```
+
+**创建自己的Chart**
+
+```shell
+helm create mychart
+cd mychart
+```
+
+<img src="README.assets/image-20201021164830570.png" alt="image-20201021164830570" style="zoom:50%;" />
+
+Chart.yaml：当前chart属性配置信息
+
+templates：编写的yaml文件，如service、deployment、ingress等
+
+values.yaml：yaml文件中可以使用的全局变量
+
+```shell
+kubectl create deployment web --image=nginx --dry-run -o yaml > deployment.yaml
+kubectl expose deployment web --port=80 --target-port=80 --type=NodePort --dry-run -o yaml > service.yaml
+```
+
+```yaml
+# valuse.yaml中定义变量和值
+replicas: 1
+image: nginx
+tag: 1.16
+label: nginx
+port: 80
+```
+
+在templates的yaml文件中使用valuse.yaml中定义的变量
+
+```yaml
+# 表达式 {{ .Values.变量名称}}
+# 动态生成Release名称 {{ .Release.Name}}
+metadata:
+  name: {{ .Release.Name}}.deploy
+# ......
+image: {{ .Values.image}}
+# ......
+app: {{ .Values.label}}
+```
+
+
+
+### 持久化存储
+
+1. **nfs 网络存储**
+
+```shell
+# nfs服务端安装nfs
+yum install -y nfs-utils
+
+# 设置挂载路径
+vi /etc/exports # 在其中设置目录
+# /data/nfs/*(rw.no_root_squash)
+
+# 在k8s集群node节点上同样安装nfs
+# 在nfs服务端启动nfs
+systemctl start nfs
+systemctl enabale nfs
+
+```
+
+```yaml
+# 在k8s集群部署应用并使用nfs持久网络存储
+apiVersion: app/v1
+kind: Deployment
+metadata:
+  name: nginx-dep1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx
+        volumeMounts:
+        - name: wwwroot
+          mountPath: /usr/share/nginx/ # 挂载的位置
+        ports:
+        - containerPort: 80
+      volumes:
+        - name: wwwroot
+          nfs: # 挂载网络nfs
+            server: 192.168.1.17 # nfs服务地址
+            path: /data/nfs
+```
+
+2. **PV和PVC**
+
+PV：持久化存储，对存储资源抽象，对外提供可以调用的地方（生产者）
+
+PVC：用于调用，不需要关心内部实现细节（消费者）
+
+```yaml
+# nginx服务
+apiVersion: app/v1
+kind: Deployment
+metadata:
+  name: nginx-dep
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx
+        volumeMounts:
+        - name: wwwroot
+          mountPath: /usr/share/nginx/ # 挂载的位置
+        ports:
+        - containerPort: 80
+      volumes:
+        - name: wwwroot
+          persistentVolumeClaim: #挂载pvc
+            claimName: my-pvc #pvc名称
+            
+---
+
+# PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage:5Gi
+```
+
+```yaml
+# PV
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: my-pv
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteMany
+  nfs:
+    path: /k8s/nfs
+    server: 192.168.1.19
+```
+
+
+
+### K8S集群资源监控
+
+**监控指标**
+
+集群监控：节点资源利用率、节点数、运行pods
+
+Pod监控：容器指标、应用程序
+
+**监控平台**
+
+prometheus：开源；监控、报警、数据库；以Http协议周期性抓取被监控组件状态
+
+grafana：开源数据分析和可视化工具，支持多种数据源
+
+<img src="README.assets/662544-20190308115806797-1750460125.png" alt="img" style="zoom:67%;" />
+
+#### 部署Prometheus
+
+```yaml
+# Configmap.yaml变量文件
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: kube-system
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval:     15s
+      evaluation_interval: 15s
+    scrape_configs:
+
+    - job_name: 'kubernetes-apiservers'
+      kubernetes_sd_configs:
+      - role: endpoints
+      scheme: https
+      tls_config:
+        ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: default;kubernetes;https
+
+    - job_name: 'kubernetes-nodes'
+      kubernetes_sd_configs:
+      - role: node
+      scheme: https
+      tls_config:
+        ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+      relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+      - target_label: __address__
+        replacement: kubernetes.default.svc:443
+      - source_labels: [__meta_kubernetes_node_name]
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/${1}/proxy/metrics
+
+    - job_name: 'kubernetes-cadvisor'
+      kubernetes_sd_configs:
+      - role: node
+      scheme: https
+      tls_config:
+        ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+      relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+      - target_label: __address__
+        replacement: kubernetes.default.svc:443
+      - source_labels: [__meta_kubernetes_node_name]
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/${1}/proxy/metrics/cadvisor
+
+    - job_name: 'kubernetes-service-endpoints'
+      kubernetes_sd_configs:
+      - role: endpoints
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+        action: keep
+        regex: true
+      - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scheme]
+        action: replace
+        target_label: __scheme__
+        regex: (https?)
+      - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__address__, __meta_kubernetes_service_annotation_prometheus_io_port]
+        action: replace
+        target_label: __address__
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+      - action: labelmap
+        regex: __meta_kubernetes_service_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: kubernetes_namespace
+      - source_labels: [__meta_kubernetes_service_name]
+        action: replace
+        target_label: kubernetes_name
+
+    - job_name: 'kubernetes-services'
+      kubernetes_sd_configs:
+      - role: service
+      metrics_path: /probe
+      params:
+        module: [http_2xx]
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_probe]
+        action: keep
+        regex: true
+      - source_labels: [__address__]
+        target_label: __param_target
+      - target_label: __address__
+        replacement: blackbox-exporter.example.com:9115
+      - source_labels: [__param_target]
+        target_label: instance
+      - action: labelmap
+        regex: __meta_kubernetes_service_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: kubernetes_namespace
+      - source_labels: [__meta_kubernetes_service_name]
+        target_label: kubernetes_name
+
+    - job_name: 'kubernetes-ingresses'
+      kubernetes_sd_configs:
+      - role: ingress
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_ingress_annotation_prometheus_io_probe]
+        action: keep
+        regex: true
+      - source_labels: [__meta_kubernetes_ingress_scheme,__address__,__meta_kubernetes_ingress_path]
+        regex: (.+);(.+);(.+)
+        replacement: ${1}://${2}${3}
+        target_label: __param_target
+      - target_label: __address__
+        replacement: blackbox-exporter.example.com:9115
+      - source_labels: [__param_target]
+        target_label: instance
+      - action: labelmap
+        regex: __meta_kubernetes_ingress_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: kubernetes_namespace
+      - source_labels: [__meta_kubernetes_ingress_name]
+        target_label: kubernetes_name
+
+    - job_name: 'kubernetes-pods'
+      kubernetes_sd_configs:
+      - role: pod
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: true
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_pod_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: kubernetes_namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: kubernetes_pod_name
+
+```
+
+```yaml
+# prometheus.deploy.yml 部署
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    name: prometheus-deployment
+  name: prometheus
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      containers:
+      - image: prom/prometheus:v2.0.0
+        name: prometheus
+        command:
+        - "/bin/prometheus"
+        args:
+        - "--config.file=/etc/prometheus/prometheus.yml"
+        - "--storage.tsdb.path=/prometheus"
+        - "--storage.tsdb.retention=24h"
+        ports:
+        - containerPort: 9090
+          protocol: TCP
+        volumeMounts:
+        - mountPath: "/prometheus"
+          name: data
+        - mountPath: "/etc/prometheus"
+          name: config-volume
+        resources:
+          requests:
+            cpu: 100m
+            memory: 100Mi
+          limits:
+            cpu: 500m
+            memory: 2500Mi
+      serviceAccountName: prometheus    
+      volumes:
+      - name: data
+        emptyDir: {}
+      - name: config-volume
+        configMap:
+          name: prometheus-config   
+
+```
+
+```yaml
+# prometheus.svc.yml 服务暴露
+---
+kind: Service
+apiVersion: v1
+metadata:
+  labels:
+    app: prometheus
+  name: prometheus
+  namespace: kube-system
+spec:
+  type: NodePort
+  ports:
+  - port: 9090
+    targetPort: 9090
+    nodePort: 30003
+  selector:
+    app: prometheus
+
+```
+
+```yaml
+# rbac-setup.yaml 服务角色权限配置
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+- apiGroups: [""]
+  resources:
+  - nodes
+  - nodes/proxy
+  - services
+  - endpoints
+  - pods
+  verbs: ["get", "list", "watch"]
+- apiGroups:
+  - extensions
+  resources:
+  - ingresses
+  verbs: ["get", "list", "watch"]
+- nonResourceURLs: ["/metrics"]
+  verbs: ["get"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+- kind: ServiceAccount
+  name: prometheus
+  namespace: kube-system
+
+```
+
+```yaml
+# node-exporter.yaml node节点的监控
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: kube-system
+  labels:
+    k8s-app: node-exporter
+spec:
+  selector:
+    matchLabels:
+      k8s-app: node-exporter
+  template:
+    metadata:
+      labels:
+        k8s-app: node-exporter
+    spec:
+      containers:
+      - image: prom/node-exporter
+        name: node-exporter
+        ports:
+        - containerPort: 9100
+          protocol: TCP
+          name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    k8s-app: node-exporter
+  name: node-exporter
+  namespace: kube-system
+spec:
+  ports:
+  - name: http
+    port: 9100
+    nodePort: 31672
+    protocol: TCP
+  type: NodePort
+  selector:
+    k8s-app: node-exporter
+
+```
+
+执行后部署完成
+
+```shell
+kubectl get pods -n kube-system
+```
+
+#### 部署Grafana
+
+```yaml
+# grafana-deploy.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana-core
+  namespace: kube-system
+  labels:
+    app: grafana
+    component: core
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+      component: core
+  template:
+    metadata:
+      labels:
+        app: grafana
+        component: core
+    spec:
+      containers:
+      - image: grafana/grafana:4.2.0
+        name: grafana-core
+        imagePullPolicy: IfNotPresent
+        # env:
+        resources:
+          # keep request = limit to keep this container in guaranteed class
+          limits:
+            cpu: 100m
+            memory: 100Mi
+          requests:
+            cpu: 100m
+            memory: 100Mi
+        env:
+          # The following env variables set up basic auth twith the default admin user and admin password.
+          - name: GF_AUTH_BASIC_ENABLED
+            value: "true"
+          - name: GF_AUTH_ANONYMOUS_ENABLED
+            value: "false"
+          # - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+          #   value: Admin
+          # does not really work, because of template variables in exported dashboards:
+          # - name: GF_DASHBOARDS_JSON_ENABLED
+          #   value: "true"
+        readinessProbe:
+          httpGet:
+            path: /login
+            port: 3000
+          # initialDelaySeconds: 30
+          # timeoutSeconds: 1
+        volumeMounts:
+        - name: grafana-persistent-storage
+          mountPath: /var
+      volumes:
+      - name: grafana-persistent-storage
+        emptyDir: {}
+
+```
+
+```yaml
+# grafana-ing.yaml
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+   name: grafana
+   namespace: kube-system
+spec:
+   rules:
+   - host: k8s.grafana
+     http:
+       paths:
+       - path: /
+         backend:
+          serviceName: grafana
+          servicePort: 3000
+
+```
+
+```yaml
+# grafana-svc.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: kube-system
+  labels:
+    app: grafana
+    component: core
+spec:
+  type: NodePort
+  ports:
+    - port: 3000
+  selector:
+    app: grafana
+    component: core
+
+```
+
+#### 构建监控
+
+部署后可查看服务运行状态
+
+![image-20201022111629345](README.assets/image-20201022111629345.png)
+
+访问grafana，初始用户名密码均为admin
+
+<img src="README.assets/image-20201022111806354.png" alt="image-20201022111806354" style="zoom:67%;" />
+
+数据源配置，选用普罗米修斯
+
+<img src="README.assets/image-20201022112440116.png" alt="image-20201022112440116" style="zoom:67%;" />
+
+设置显示数据模板，采用k8s的监控模板
+
+https://grafana.com/grafana/dashboards/315
+
+![image-20201022113351345](README.assets/image-20201022113351345.png)
+
+
+
+## 搭建高可用集群
+
+| 角色          | IP           |
+| ------------- | ------------ |
+| master1       | 192.168.1.18 |
+| master2       | 192.168.1.19 |
+| node1         | 192.168.1.20 |
+| VIP（虚拟ip） | 192.168.1.21 |
+
+在master中需要部署keepalived，haproxy(负载均衡)，及apiserver、controller-manager、scheduler..
+
+### 部署keepalived
+
+master节点部署keepalived
+
+```shell
+yum install -y conntrack-tools libseccomp libtool-ltdl
+yum install -y keepalived
+```
+
+master1节点配置
+
+```shell
+cat > /etc/keepalived/keepalived.conf <<EOF 
+! Configuration File for keepalived
+
+global_defs {
+   router_id k8s
+}
+
+vrrp_script check_haproxy {
+    script "killall -0 haproxy"
+    interval 3
+    weight -2
+    fall 10
+    rise 2
+}
+
+vrrp_instance VI_1 {
+    state MASTER 
+    interface ens33 
+    virtual_router_id 51
+    priority 250
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass ceb1b3ec013d66163d6ab
+    }
+    virtual_ipaddress {
+        192.168.1.21
+    }
+    track_script {
+        check_haproxy
+    }
+
+}
+EOF
+```
+
+master2节点配置
+
+```shell
+cat > /etc/keepalived/keepalived.conf <<EOF 
+! Configuration File for keepalived
+
+global_defs {
+   router_id k8s
+}
+
+vrrp_script check_haproxy {
+    script "killall -0 haproxy"
+    interval 3
+    weight -2
+    fall 10
+    rise 2
+}
+
+vrrp_instance VI_1 {
+    state BACKUP 
+    interface ens33 
+    virtual_router_id 51
+    priority 200
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass ceb1b3ec013d66163d6ab
+    }
+    virtual_ipaddress {
+        192.168.1.21
+    }
+    track_script {
+        check_haproxy
+    }
+
+}
+EOF
+```
+
+启动并检查
+
+```shell
+systemctl start keepalived.service
+systemctl enable keepalived.service
+systemctl status keepalived.service
+ip a s eth0
+```
+
+### 部署haproxy
+
+```shell
+yum install -y haproxy
+```
+
+配置文件:两台master节点的配置均相同，配置中声明了后端代理的两个master节点服务器，指定了haproxy运行的端口为16443等，因此16443端口为集群的入口
+
+```shell
+cat > /etc/haproxy/haproxy.cfg << EOF
+#---------------------------------------------------------------------
+# Global settings
+#---------------------------------------------------------------------
+global
+    # to have these messages end up in /var/log/haproxy.log you will
+    # need to:
+    # 1) configure syslog to accept network log events.  This is done
+    #    by adding the '-r' option to the SYSLOGD_OPTIONS in
+    #    /etc/sysconfig/syslog
+    # 2) configure local2 events to go to the /var/log/haproxy.log
+    #   file. A line like the following can be added to
+    #   /etc/sysconfig/syslog
+    #
+    #    local2.*                       /var/log/haproxy.log
+    #
+    log         127.0.0.1 local2
+    
+    chroot      /var/lib/haproxy
+    pidfile     /var/run/haproxy.pid
+    maxconn     4000
+    user        haproxy
+    group       haproxy
+    daemon 
+       
+    # turn on stats unix socket
+    stats socket /var/lib/haproxy/stats
+#---------------------------------------------------------------------
+# common defaults that all the 'listen' and 'backend' sections will
+# use if not designated in their block
+#---------------------------------------------------------------------  
+defaults
+    mode                    http
+    log                     global
+    option                  httplog
+    option                  dontlognull
+    option http-server-close
+    option forwardfor       except 127.0.0.0/8
+    option                  redispatch
+    retries                 3
+    timeout http-request    10s
+    timeout queue           1m
+    timeout connect         10s
+    timeout client          1m
+    timeout server          1m
+    timeout http-keep-alive 10s
+    timeout check           10s
+    maxconn                 3000
+#---------------------------------------------------------------------
+# kubernetes apiserver frontend which proxys to the backends
+#--------------------------------------------------------------------- 
+frontend kubernetes-apiserver
+    mode                 tcp
+    bind                 *:16443
+    option               tcplog
+    default_backend      kubernetes-apiserver    
+#---------------------------------------------------------------------
+# round robin balancing between the various backends
+#---------------------------------------------------------------------
+backend kubernetes-apiserver
+    mode        tcp
+    balance     roundrobin
+    server      master01.k8s.io   192.168.1.18:6443 check
+    server      master02.k8s.io   192.168.1.19:6443 check
+#---------------------------------------------------------------------
+# collection haproxy statistics message
+#---------------------------------------------------------------------
+listen stats
+    bind                 *:1080
+    stats auth           admin:awesomePassword
+    stats refresh        5s
+    stats realm          HAProxy\ Statistics
+    stats uri            /admin?stats
+EOF
+```
+
+启动并检查
+
+```shell
+systemctl enable haproxy
+systemctl start haproxy
+systemctl status haproxy
+netstat -lntup|grep haproxy
+```
+
+### 节点安装Docker/kubeadm/kubelet/kubectl
+
+[采用kubeadm章节中的方式安装](#节点安装Docker、kubeadm、kubelet)并配置即可
+
+```shell
+cat >> /etc/hosts << EOF
+192.168.1.21    master.k8s.io   k8s-vip
+192.168.1.18    master01.k8s.io master1
+192.168.1.19    master02.k8s.io master2
+192.168.1.20    node01.k8s.io   node1
+EOF
+```
+
+
+
+### 部署Master
+
+创建kubeadm配置文件
+
+```shell
+# 在vip master操作，即master1
+mkdir /usr/local/kubernetes/manifests -p
+cd /usr/local/kubernetes/manifests/
+vi kubeadm-config.yaml
+```
+
+````yaml
+apiServer:
+  certSANs:
+    - master1
+    - master2
+    - master.k8s.io
+    - 192.168.1.18
+    - 192.168.1.19
+    - 192.168.1.21
+    - 127.0.0.1
+  extraArgs:
+    authorization-mode: Node,RBAC
+  timeoutForControlPlane: 4m0s
+apiVersion: kubeadm.k8s.io/v1beta1
+certificatesDir: /etc/kubernetes/pki
+clusterName: kubernetes
+controlPlaneEndpoint: "master.k8s.io:16443"
+controllerManager: {}
+dns: 
+  type: CoreDNS
+etcd:
+  local:    
+    dataDir: /var/lib/etcd
+imageRepository: registry.aliyuncs.com/google_containers
+kind: ClusterConfiguration
+kubernetesVersion: v1.18.0
+networking: 
+  dnsDomain: cluster.local  
+  podSubnet: 10.244.0.0/16
+  serviceSubnet: 10.1.0.0/16
+scheduler: {}
+````
+
+```shell
+kubeadm init --config kubeadm-config.yaml
+```
+
+```shell
+# 配置环境变量
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+kubectl get nodes
+kubectl get pods -n kube-system
+```
+
+```shell
+# 加入--control-plane表示master加入集群
+kubeadm join master.k8s.io:16443 --token cnf4ay.j56f487khfiv3u43 \
+    --discovery-token-ca-cert-hash sha256:e8da75c046c6fcd7753bdbf0a9145c25a5eb49818d022dd9f4724ca1e59ef5d0 \
+    --control-plane 
+```
+
+
+
+### 安装集群网络
+
+```shell
+mkdir flannel
+cd flannel
+wget -c https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+# 安装
+kubectl apply -f kube-flannel.yml
+# 检查
+kubectl get pods -n kube-system
+```
+
+master1已经启动：
+
+<img src="README.assets/image-20201024090120560.png" alt="image-20201024090120560" style="zoom:50%;" />
+
+Master2加入集群
+
+拷贝秘钥文件
+
+```shell
+# ssh root@192.168.1.19 mkdir -p /etc/kubernetes/pki/etcd
+
+# scp /etc/kubernetes/admin.conf root@192.168.1.19:/etc/kubernetes
+   
+# scp /etc/kubernetes/pki/{ca.*,sa.*,front-proxy-ca.*} root@192.168.1.19:/etc/kubernetes/pki
+   
+# scp /etc/kubernetes/pki/etcd/ca.* root@192.168.1.19:/etc/kubernetes/pki/etcd
+```
+
+执行加入的kubeadm join指令即可
+
+node加入也志雄kubeadm join
+
+### **可能问题**
+
+1. 对于kubeadm join 打印日志：
+
+```shell
+k8s Could not find a JWS signature in the cluster-info ConfigMap for token ID "vezzap"
+
+kubeadm join —
+error execution phase preflight: couldn’t validate the identity of the API Server: abort connecting to API servers after timeout of 5m0s
+```
+
+此原因为没有token，或者token失效，需重新生成token
+
+```shell
+kubeadm token create
+
+openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2>/dev/null | \
+openssl dgst -sha256 -hex | sed 's/^.* //'
+```
+
+将新获取到的token和--discovery-token-ca-cert-hash替换join命令中的位置即可。
+
+2. 出现虚拟ip未生效
+
+```shell
+Unable to connect to the server: dial tcp 192.168.0.132:16443: connect: no route to host
+```
+
+重启keepalived
+
+```shell
+systemctl restart keepalived.service
+ip a s eth0
+```
+
+### 测试集群运行
+
+```shell
+kubectl create deployment nginx --image=nginx
+kubectl expose deployment nginx --port=80 --type=NodePort
+kubectl get pod,svc
+```
+
+
 
 
 
