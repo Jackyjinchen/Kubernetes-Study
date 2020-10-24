@@ -3323,13 +3323,41 @@ kubectl expose deployment nginx --port=80 --type=NodePort
 kubectl get pod,svc
 ```
 
+## K8S集群部署项目
 
+![image-20201024103750930](README.assets/image-20201024103750930.png)
 
+1. java打包(jar或者war包：java -jar/直接部署在tomcat)，并编写Dockerfile
 
+```shell
+mvn clean package
+```
 
+2. Docker镜像制作
 
+```shell
+docker build -t mytomcat .
+# 查看镜像
+docker images
+# 本地测试
+docker run -d -p 8000:8000 mytomcat -t
+```
 
+3. 上传镜像到镜像服务器中
+4. 构建k8s
 
+```shell
+# 创建yaml文件
+kubectl create deployment javademo --image=xxxx --dir-run -o yaml > javademo.yaml
+# 执行
+kubectl apply -f javademo.yaml
+# 查看
+kubectl get pods -o wide
+# 扩容
+kubectl scale deployment javademo --replicas=3
+# 服务暴露Service(或者采用Ingress)
+kubectl expose deployment javademo --port=8000 --target-port=8000 --type=NodePort
+```
 
 ## 参考
 
@@ -3342,3 +3370,13 @@ mac下Paralles配置CentOS网络：https://www.cnblogs.com/ghj1976/p/3746375.htm
 CFSSL证书生成：https://blog.csdn.net/sujosu/article/details/101520260
 
 K8S安全机制：https://www.cnblogs.com/benjamin77/p/12446780.html
+
+
+
+## Fin
+
+Kubernetes学习笔记
+
+Jackyjinchen
+
+2020年10月24日
