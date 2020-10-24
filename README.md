@@ -2490,6 +2490,84 @@ spec:
 
 
 
+### K8S dashboard
+
+```shell
+wget https://raw.githubusercontent.com/kubernetes/dashboard/v2.0.0-rc5/aio/deploy/recommended.yaml
+# 创建 pod
+kubectl apply -f recommended.yaml
+# 删除 重建 修改为NodePort
+kubectl delete service kubernetes-dashboard --namespace=kubernetes-dashboard
+```
+
+```yaml
+# 配置文件
+vi dashboard-svc.yaml
+ 
+# 内容
+kind: Service
+apiVersion: v1
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+  namespace: kubernetes-dashboard
+spec:
+  type: NodePort
+  ports:
+    - port: 443
+      targetPort: 8443
+  selector:
+    k8s-app: kubernetes-dashboard
+ 
+ 
+# 执行
+kubectl apply -f dashboard-svc.yaml
+```
+
+```yaml
+# 配置访问权限
+vi dashboard-svc-account.yaml
+ 
+# 结果
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dashboard-admin
+  namespace: kube-system
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: dashboard-admin
+subjects:
+  - kind: ServiceAccount
+    name: dashboard-admin
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+ 
+ 
+# 执行
+kubectl apply -f dashboard-svc-account.yaml
+```
+
+```shell
+kubectl get secret -n kube-system |grep admin|awk '{print $1}'
+# 复制下面的 token,后面登陆的时候要用到
+输出: dashboard-admin-token-bwgjv
+
+kubectl describe secret dashboard-admin-token-bwgjv -n kube-system|grep '^token'|awk '{print $2}'
+```
+
+访问时，chrome无法进入，随意点击网页并输入thisisunsafe即可进入
+
+<img src="README.assets/image-20201024152700951.png" alt="image-20201024152700951" style="zoom:50%;" />
+
+
+
 ### K8S集群资源监控
 
 **监控指标**
